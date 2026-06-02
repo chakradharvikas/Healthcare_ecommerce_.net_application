@@ -1,0 +1,62 @@
+﻿@implements IDisposable
+
+<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">ECommerce Store</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="flex-column">
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Shop
+            </NavLink>
+        </div>
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="cart">
+                <span class="bi bi-cart-fill-nav-menu" aria-hidden="true"></span> Cart
+            </NavLink>
+        </div>
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="orders">
+                <span class="bi bi-list-nested-nav-menu" aria-hidden="true"></span> Orders
+            </NavLink>
+        </div>
+        @if (Auth.IsAuthenticated)
+        {
+            <div class="nav-item px-3">
+                <span class="nav-link text-light">Hello, @Auth.FullName</span>
+            </div>
+            <div class="nav-item px-3">
+                <button class="nav-link btn btn-link text-start" @onclick="Logout">Logout</button>
+            </div>
+        }
+        else
+        {
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="login">Login</NavLink>
+            </div>
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="register">Register</NavLink>
+            </div>
+        }
+    </nav>
+</div>
+
+@code {
+    [Inject] private AuthStateService Auth { get; set; } = default!;
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+
+    protected override void OnInitialized() => Auth.OnChange += StateHasChanged;
+
+    private void Logout()
+    {
+        Auth.Logout();
+        Navigation.NavigateTo("/");
+    }
+
+    public void Dispose() => Auth.OnChange -= StateHasChanged;
+}

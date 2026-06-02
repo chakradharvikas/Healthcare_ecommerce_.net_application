@@ -1,0 +1,152 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  buildConfiguration: Release
+  dotnetVersion: '8.0.x'
+  apiProject: 'src/ECommerce.Api/ECommerce.Api.csproj'
+  webProject: 'src/ECommerce.Web/ECommerce.Web.csproj'
+  testProject: 'tests/ECommerce.Tests/ECommerce.Tests.csproj'
+
+stages:
+  - stage: Build
+    displayName: Build and Test
+    jobs:
+      - job: BuildJob
+        displayName: Build, Test, Publish
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseDotNet@2
+            displayName: Install .NET SDK
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+
+          - task: DotNetCoreCLI@2
+            displayName: Restore
+            inputs:
+              command: restore
+              projects: '**/*.sln'
+
+          - task: DotNetCoreCLI@2
+            displayName: Build
+            inputs:
+              command: build
+              projects: '**/*.sln'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: Run Tests
+            inputs:
+              command: test
+              projects: $(testProject)
+              arguments: '--configuration $(buildConfiguration) --no-build --collect:"XPlat Code Coverage"'
+
+          - task: DotNetCoreCLI@2
+            displayName: Publish API
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: $(apiProject)
+              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/api'
+              zipAfterPublish: true
+
+          - task: DotNetCoreCLI@2
+            displayName: Publish Web
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: $(webProject)
+              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/web'
+              zipAfterPublish: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: Publish Artifacts
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: drop
+              publishLocation: Container
+
+  - stage: DeployDev
+    displayName: Deploy to Development
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployApiDev
+        displayName: Deploy API to Dev
+        environment: ecommerce-dev
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    buildType: current
+                    downloadType: single
+                    artifactName: drop
+                    downloadPath: $(System.ArtifactsDirectory)
+
+                - task: AzureWebApp@1
+                  displayName: Deploy API App Service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appType: webAppLinux
+                    appName: $(apiAppNameDev)
+                    package: '$(System.ArtifactsDirectory)/drop/api/*.zip'
+
+                - task: AzureWebApp@1
+                  displayName: Deploy Web App Service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appType: webAppLinux
+                    appName: $(webAppNameDev)
+                    package: '$(System.ArtifactsDirectory)/drop/web/*.zip'
+
+  - stage: DeployProd
+    displayName: Deploy to Production
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployApiProd
+        displayName: Deploy to Production
+        environment: ecommerce-prod
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    buildType: current
+                    downloadType: single
+                    artifactName: drop
+                    downloadPath: $(System.ArtifactsDirectory)
+
+                - task: AzureWebApp@1
+                  displayName: Deploy API App Service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appType: webAppLinux
+                    appName: $(apiAppNameProd)
+                    package: '$(System.ArtifactsDirectory)/drop/api/*.zip'
+
+                - task: AzureWebApp@1
+                  displayName: Deploy Web App Service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appType: webAppLinux
+                    appName: $(webAppNameProd)
+                    package: '$(System.ArtifactsDirectory)/drop/web/*.zip'

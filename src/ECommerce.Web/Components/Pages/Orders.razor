@@ -1,0 +1,79 @@
+@page "/orders"
+@rendermode InteractiveServer
+@inject ApiClient Api
+@inject AuthStateService Auth
+
+<PageTitle>My Orders</PageTitle>
+
+<h2>My Orders</h2>
+
+@if (!Auth.IsAuthenticated)
+{
+    <div class="alert alert-warning">Please <a href="/login">login</a> to view orders.</div>
+}
+else if (_loading)
+{
+    <p>Loading orders...</p>
+}
+else if (_orders.Count == 0)
+{
+    <p>No orders yet. <a href="/">Start shopping</a></p>
+}
+else
+{
+    @foreach (var order in _orders)
+    {
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between">
+                <span>Order #@order.Id.ToString()[..8]</span>
+                <span>@order.CreatedAt.ToLocalTime().ToString("g")</span>
+            </div>
+            <div class="card-body">
+                <p><strong>Status:</strong> @order.Status</p>
+                <p><strong>Ship to:</strong> @order.ShippingAddress</p>
+                <ul>
+                    @foreach (var item in order.Items)
+                    {
+                        <li>@item.ProductName x @item.Quantity — @item.LineTotal.ToString("C")</li>
+                    }
+                </ul>
+                <strong>Total: @order.TotalAmount.ToString("C")</strong>
+            </div>
+        </div>
+    }
+}
+
+@if (_success is not null)
+{
+    <div class="alert alert-success">Order placed successfully!</div>
+}
+
+@code {
+    private IReadOnlyList<OrderDto> _orders = [];
+    private bool _loading = true;
+    private string? _success;
+
+    [SupplyParameterFromQuery]
+    public string? Placed { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!string.IsNullOrEmpty(Placed))
+            _success = "Order placed successfully!";
+
+        if (!Auth.IsAuthenticated)
+        {
+            _loading = false;
+            return;
+        }
+
+        try
+        {
+            _orders = await Api.GetOrdersAsync();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

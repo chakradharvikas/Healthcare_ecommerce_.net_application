@@ -1,0 +1,58 @@
+@page "/checkout"
+@rendermode InteractiveServer
+@inject ApiClient Api
+@inject AuthStateService Auth
+@inject NavigationManager Navigation
+
+<PageTitle>Checkout</PageTitle>
+
+<h2>Checkout</h2>
+
+@if (!Auth.IsAuthenticated)
+{
+    <div class="alert alert-warning">Please <a href="/login">login</a> to checkout.</div>
+}
+else
+{
+    <EditForm Model="_model" OnValidSubmit="PlaceOrder">
+        <div class="mb-3">
+            <label class="form-label">Shipping Address</label>
+            <InputTextArea @bind-Value="_model.ShippingAddress" class="form-control" rows="3" />
+        </div>
+        @if (_error is not null)
+        {
+            <div class="alert alert-danger">@_error</div>
+        }
+        <button class="btn btn-success" disabled="@_loading">@(_loading ? "Placing order..." : "Place Order")</button>
+    </EditForm>
+}
+
+@code {
+    private CheckoutModel _model = new();
+    private bool _loading;
+    private string? _error;
+
+    private async Task PlaceOrder()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var order = await Api.CheckoutAsync(new CreateOrderDto(_model.ShippingAddress));
+            Navigation.NavigateTo($"/orders?placed={order.Id}");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private class CheckoutModel
+    {
+        public string ShippingAddress { get; set; } = string.Empty;
+    }
+}

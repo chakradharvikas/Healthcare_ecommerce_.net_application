@@ -1,0 +1,126 @@
+@page "/cart"
+@rendermode InteractiveServer
+@inject ApiClient Api
+@inject AuthStateService Auth
+@inject NavigationManager Navigation
+
+<PageTitle>Shopping Cart</PageTitle>
+
+<h2>Shopping Cart</h2>
+
+@if (!Auth.IsAuthenticated)
+{
+    <div class="alert alert-warning">Please <a href="/login">login</a> to view your cart.</div>
+}
+else if (_loading)
+{
+    <p>Loading cart...</p>
+}
+else if (_items.Count == 0)
+{
+    <p>Your cart is empty. <a href="/">Continue shopping</a></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Product</th>
+                <th>Price</th>
+                <th>Qty</th>
+                <th>Total</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in _items)
+            {
+                <tr>
+                    <td>@item.ProductName</td>
+                    <td>@item.UnitPrice.ToString("C")</td>
+                    <td>
+                        <input type="number" class="form-control form-control-sm qty-input" min="1"
+                               value="@item.Quantity" @onchange="e => UpdateQty(item, e)" />
+                    </td>
+                    <td>@item.LineTotal.ToString("C")</td>
+                    <td>
+                        <button class="btn btn-outline-danger btn-sm" @onclick="() => Remove(item.ProductId)">Remove</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="3" class="text-end"><strong>Total</strong></td>
+                <td colspan="2"><strong>@_items.Sum(i => i.LineTotal).ToString("C")</strong></td>
+            </tr>
+        </tfoot>
+    </table>
+    <a class="btn btn-success" href="/checkout">Proceed to Checkout</a>
+}
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger mt-3">@_error</div>
+}
+
+@code {
+    private IReadOnlyList<CartItemDto> _items = [];
+    private bool _loading = true;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Auth.IsAuthenticated)
+        {
+            _loading = false;
+            return;
+        }
+
+        await LoadCart();
+    }
+
+    private async Task LoadCart()
+    {
+        _loading = true;
+        try
+        {
+            _items = await Api.GetCartAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task UpdateQty(CartItemDto item, ChangeEventArgs e)
+    {
+        if (!int.TryParse(e.Value?.ToString(), out var qty)) return;
+        try
+        {
+            await Api.UpdateCartItemAsync(item.ProductId, new UpdateCartItemDto(qty));
+            await LoadCart();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task Remove(Guid productId)
+    {
+        try
+        {
+            await Api.RemoveFromCartAsync(productId);
+            await LoadCart();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

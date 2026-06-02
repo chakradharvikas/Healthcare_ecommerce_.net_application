@@ -1,0 +1,96 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject ApiClient Api
+@inject AuthStateService Auth
+@inject NavigationManager Navigation
+
+<PageTitle>Shop - ECommerce Store</PageTitle>
+
+<div class="hero mb-4">
+    <h1>Welcome to ECommerce Store</h1>
+    <p class="lead">Browse our catalog and shop with confidence.</p>
+</div>
+
+@if (_loading)
+{
+    <p>Loading products...</p>
+}
+else if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+else
+{
+    <div class="row g-4">
+        @foreach (var product in _products)
+        {
+            <div class="col-md-4">
+                <div class="card h-100 product-card">
+                    <img src="@(product.ImageUrl ?? "https://picsum.photos/400/300")" class="card-img-top" alt="@product.Name" />
+                    <div class="card-body d-flex flex-column">
+                        <span class="badge bg-secondary mb-2">@product.Category</span>
+                        <h5 class="card-title">@product.Name</h5>
+                        <p class="card-text flex-grow-1">@product.Description</p>
+                        <div class="d-flex justify-content-between align-items-center mt-auto">
+                            <strong class="price">@product.Price.ToString("C")</strong>
+                            <button class="btn btn-primary btn-sm" @onclick="() => AddToCart(product)" disabled="@(!Auth.IsAuthenticated || product.StockQuantity == 0)">
+                                Add to Cart
+                            </button>
+                        </div>
+                        @if (product.StockQuantity == 0)
+                        {
+                            <small class="text-danger">Out of stock</small>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@if (_message is not null)
+{
+    <div class="alert alert-success mt-3">@_message</div>
+}
+
+@code {
+    private IReadOnlyList<ProductDto> _products = [];
+    private bool _loading = true;
+    private string? _error;
+    private string? _message;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _products = await Api.GetProductsAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task AddToCart(ProductDto product)
+    {
+        if (!Auth.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+            return;
+        }
+
+        try
+        {
+            await Api.AddToCartAsync(new AddToCartDto(product.Id, 1));
+            _message = $"{product.Name} added to cart.";
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

@@ -1,0 +1,60 @@
+@page "/login"
+@rendermode InteractiveServer
+@inject ApiClient Api
+@inject AuthStateService Auth
+@inject NavigationManager Navigation
+
+<PageTitle>Login</PageTitle>
+
+<div class="auth-form mx-auto">
+    <h2>Sign In</h2>
+    <EditForm Model="_model" OnValidSubmit="HandleLogin">
+        <div class="mb-3">
+            <label class="form-label">Email</label>
+            <InputText @bind-Value="_model.Email" class="form-control" />
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Password</label>
+            <InputText @bind-Value="_model.Password" type="password" class="form-control" />
+        </div>
+        @if (_error is not null)
+        {
+            <div class="alert alert-danger">@_error</div>
+        }
+        <button class="btn btn-primary w-100" disabled="@_loading">@(_loading ? "Signing in..." : "Login")</button>
+    </EditForm>
+    <p class="mt-3 text-center">No account? <a href="/register">Register</a></p>
+    <p class="text-muted small text-center">Demo admin: admin@ecommerce.com / Admin@123!</p>
+</div>
+
+@code {
+    private LoginModel _model = new();
+    private bool _loading;
+    private string? _error;
+
+    private async Task HandleLogin()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var response = await Api.LoginAsync(new LoginDto(_model.Email, _model.Password));
+            Auth.SetAuth(response);
+            Navigation.NavigateTo("/");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private class LoginModel
+    {
+        public string Email { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+}
