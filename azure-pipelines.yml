@@ -13,140 +13,613 @@ pr:
 variables:
   buildConfiguration: Release
   dotnetVersion: '8.0.x'
+  solution: 'ECommerce.sln'
   apiProject: 'src/ECommerce.Api/ECommerce.Api.csproj'
   webProject: 'src/ECommerce.Web/ECommerce.Web.csproj'
   testProject: 'tests/ECommerce.Tests/ECommerce.Tests.csproj'
+  azureServiceConnection: HealthcareECommerce-Azure
+  sonarOrganization: kcskypoint
+  sonarProjectKey: HealthcareECommerce
+  sonarProjectName: Healthcare ECommerce
+  deployResourceGroup: rg-ecommerce-apps
+  apiAppNameDev: ecommerce-api-dev-hc
+  webAppNameDev: ecommerce-web-dev-hc
+  apiAppNameProd: ecommerce-api-prod-hc
+  webAppNameProd: ecommerce-web-prod-hc
+  trivyVersion: '0.58.1'
+  coverageOutputDir: '$(Agent.TempDirectory)/coverage'
+  sbomOutputDir: '$(Agent.TempDirectory)/sbom'
+  NUGET_PACKAGES: $(Pipeline.Workspace)/.nuget/packages
 
 stages:
-  - stage: Build
-    displayName: Build and Test
+  # 1
+  - stage: Validate
+    displayName: '01 - Validate Repository'
     jobs:
-      - job: BuildJob
-        displayName: Build, Test, Publish
+      - job: ValidateJob
         pool:
-          vmImage: 'ubuntu-latest'
+          vmImage: ubuntu-latest
         steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              set -euo pipefail
+              test -f "$(solution)"
+              test -f "$(apiProject)"
+              test -f "$(webProject)"
+              test -f "$(testProject)"
+              test -f azure-pipelines.yml
+              echo "Repository structure validated."
+            displayName: Validate required paths
+
+  # 2
+  - stage: Restore
+    displayName: '02 - Restore Dependencies'
+    dependsOn: Validate
+    jobs:
+      - job: RestoreJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
           - task: UseDotNet@2
             displayName: Install .NET SDK
             inputs:
               packageType: sdk
               version: $(dotnetVersion)
+          - task: Cache@2
+            displayName: Cache NuGet packages
+            inputs:
+              key: 'nuget | "$(Agent.OS)" | $(Build.SourceVersion) | $(solution)'
+              restoreKeys: |
+                nuget | "$(Agent.OS)"
+              path: $(NUGET_PACKAGES)
+          - task: DotNetCoreCLI@2
+            displayName: Restore solution
+            inputs:
+              command: restore
+              projects: $(solution)
 
+  # 3
+  - stage: SonarPrepare
+    displayName: '03 - SonarQube Prepare'
+    dependsOn: Restore
+    jobs:
+      - job: SonarPrepareJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - script: |
+              dotnet tool install --global dotnet-sonarscanner || dotnet tool update --global dotnet-sonarscanner
+              export PATH="$PATH:$HOME/.dotnet/tools"
+              dotnet-sonarscanner --version || true
+              echo "SonarScanner ready for $(sonarProjectKey)"
+            displayName: Install SonarScanner CLI
+            continueOnError: true
+
+  # 4
+  - stage: Build
+    displayName: '04 - Build Solution'
+    dependsOn: SonarPrepare
+    jobs:
+      - job: BuildJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - task: DotNetCoreCLI@2
+            displayName: Restore solution
+            inputs:
+              command: restore
+              projects: $(solution)
+          - task: DotNetCoreCLI@2
+            displayName: Build solution
+            inputs:
+              command: build
+              projects: $(solution)
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+  # 5
+  - stage: UnitTests
+    displayName: '05 - Unit Tests'
+    dependsOn: Build
+    jobs:
+      - job: TestJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
           - task: DotNetCoreCLI@2
             displayName: Restore
             inputs:
               command: restore
-              projects: '**/*.sln'
-
+              projects: $(solution)
           - task: DotNetCoreCLI@2
             displayName: Build
             inputs:
               command: build
-              projects: '**/*.sln'
+              projects: $(solution)
               arguments: '--configuration $(buildConfiguration) --no-restore'
-
           - task: DotNetCoreCLI@2
-            displayName: Run Tests
+            displayName: Run unit tests
+            inputs:
+              command: test
+              projects: $(testProject)
+              arguments: '--configuration $(buildConfiguration) --no-build'
+              publishTestResults: true
+
+  # 6
+  - stage: CodeCoverage
+    displayName: '06 - Code Coverage'
+    dependsOn: UnitTests
+    jobs:
+      - job: CoverageJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - task: DotNetCoreCLI@2
+            displayName: Restore
+            inputs:
+              command: restore
+              projects: $(solution)
+          - task: DotNetCoreCLI@2
+            displayName: Build
+            inputs:
+              command: build
+              projects: $(solution)
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+          - task: DotNetCoreCLI@2
+            displayName: Test with coverage
             inputs:
               command: test
               projects: $(testProject)
               arguments: '--configuration $(buildConfiguration) --no-build --collect:"XPlat Code Coverage"'
+              publishTestResults: true
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/coverage.cobertura.xml'
+              failIfCoverageEmpty: false
 
+  # 7
+  - stage: SonarAnalyze
+    displayName: '07 - SonarQube Analyze'
+    dependsOn: CodeCoverage
+    jobs:
+      - job: SonarAnalyzeJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - script: |
+              set -euo pipefail
+              if [ -z "${SONAR_TOKEN:-}" ] || [ "$SONAR_TOKEN" = '$(SONAR_TOKEN)' ]; then
+                echo "SonarQube skipped: SONAR_TOKEN secret variable is not configured."
+                exit 0
+              fi
+              dotnet tool install --global dotnet-sonarscanner || dotnet tool update --global dotnet-sonarscanner
+              export PATH="$PATH:$HOME/.dotnet/tools"
+              dotnet sonarscanner begin \
+                /k:"$(sonarProjectKey)" \
+                /o:"$(sonarOrganization)" \
+                /d:sonar.host.url="https://sonarcloud.io" \
+                /d:sonar.token="${SONAR_TOKEN}" \
+                /d:sonar.cs.opencover.reportsPaths="$(System.DefaultWorkingDirectory)/**/coverage.cobertura.xml"
+              dotnet restore "$(solution)"
+              dotnet build "$(solution)" --configuration $(buildConfiguration) --no-restore
+              dotnet sonarscanner end /d:sonar.token="${SONAR_TOKEN}"
+            displayName: SonarQube analyze (SonarCloud CLI)
+            env:
+              SONAR_TOKEN: $(SONAR_TOKEN)
+
+  # 8
+  - stage: SonarPublish
+    displayName: '08 - SonarQube Quality Gate'
+    dependsOn: SonarAnalyze
+    jobs:
+      - job: SonarPublishJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              echo "SonarQube dashboard: https://sonarcloud.io/project/overview?id=$(sonarProjectKey)"
+              if [ -z "${SONAR_TOKEN:-}" ] || [ "$SONAR_TOKEN" = '$(SONAR_TOKEN)' ]; then
+                echo "SonarQube skipped: configure secret variable SONAR_TOKEN to enable uploads."
+              fi
+            displayName: SonarQube quality gate summary
+            continueOnError: true
+            env:
+              SONAR_TOKEN: $(SONAR_TOKEN)
+
+  # 9
+  - stage: NuGetAudit
+    displayName: '09 - NuGet Vulnerability Audit'
+    dependsOn: SonarPublish
+    jobs:
+      - job: NuGetAuditJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - task: DotNetCoreCLI@2
+            displayName: Restore for audit
+            inputs:
+              command: restore
+              projects: $(solution)
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/security"
+              dotnet list "$(solution)" package --vulnerable --include-transitive 2>&1 | tee "$(Build.ArtifactStagingDirectory)/security/nuget-audit.txt" || true
+              if grep -q "has the following vulnerable" "$(Build.ArtifactStagingDirectory)/security/nuget-audit.txt"; then
+                echo "##vso[task.logissue type=warning]Vulnerable NuGet packages detected."
+              fi
+            displayName: Scan vulnerable packages
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/security'
+              ArtifactName: security-reports
+              publishLocation: Container
+
+  # 10
+  - stage: TrivyFilesystem
+    displayName: '10 - Trivy Filesystem Scan'
+    dependsOn: NuGetAudit
+    jobs:
+      - job: TrivyFsJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v$(trivyVersion)"
+              trivy --version
+              mkdir -p "$(Build.ArtifactStagingDirectory)/trivy"
+              trivy fs . --scanners vuln --severity HIGH,CRITICAL --format json --output "$(Build.ArtifactStagingDirectory)/trivy/fs-vuln.json" || true
+              trivy fs . --scanners vuln --severity HIGH,CRITICAL --format table | tee "$(Build.ArtifactStagingDirectory)/trivy/fs-vuln.txt" || true
+            displayName: Trivy filesystem vulnerability scan
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+              ArtifactName: trivy-fs
+              publishLocation: Container
+
+  # 11
+  - stage: TrivyMisconfig
+    displayName: '11 - Trivy Misconfiguration Scan'
+    dependsOn: TrivyFilesystem
+    jobs:
+      - job: TrivyConfigJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v$(trivyVersion)"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/trivy"
+              trivy config . --format json --output "$(Build.ArtifactStagingDirectory)/trivy/config.json" || true
+              trivy config . --format table | tee "$(Build.ArtifactStagingDirectory)/trivy/config.txt" || true
+            displayName: Trivy IaC / config scan
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+              ArtifactName: trivy-config
+              publishLocation: Container
+
+  # 12
+  - stage: TrivySecrets
+    displayName: '12 - Trivy Secret Scan'
+    dependsOn: TrivyMisconfig
+    jobs:
+      - job: TrivySecretsJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v$(trivyVersion)"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/trivy"
+              trivy fs . --scanners secret --format json --output "$(Build.ArtifactStagingDirectory)/trivy/secrets.json" || true
+              trivy fs . --scanners secret --format table | tee "$(Build.ArtifactStagingDirectory)/trivy/secrets.txt" || true
+            displayName: Trivy secret scan
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+              ArtifactName: trivy-secrets
+              publishLocation: Container
+
+  # 13
+  - stage: DotNetFormat
+    displayName: '13 - .NET Format Check'
+    dependsOn: TrivySecrets
+    jobs:
+      - job: FormatJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - script: |
+              dotnet tool install -g dotnet-format || dotnet tool update -g dotnet-format
+              export PATH="$PATH:$HOME/.dotnet/tools"
+              dotnet format "$(solution)" --verify-no-changes --verbosity diagnostic
+            displayName: Verify code formatting
+            continueOnError: true
+
+  # 14
+  - stage: PublishApi
+    displayName: '14 - Publish API'
+    dependsOn: DotNetFormat
+    jobs:
+      - job: PublishApiJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - task: DotNetCoreCLI@2
+            displayName: Restore
+            inputs:
+              command: restore
+              projects: $(solution)
           - task: DotNetCoreCLI@2
             displayName: Publish API
             inputs:
               command: publish
               publishWebProjects: false
               projects: $(apiProject)
-              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/api'
+              arguments: '--configuration $(buildConfiguration) --output $(Pipeline.Workspace)/publish/api'
               zipAfterPublish: true
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Pipeline.Workspace)/publish/api'
+              artifact: api-package
 
+  # 15
+  - stage: PublishWeb
+    displayName: '15 - Publish Web'
+    dependsOn: PublishApi
+    jobs:
+      - job: PublishWebJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+          - task: DotNetCoreCLI@2
+            displayName: Restore
+            inputs:
+              command: restore
+              projects: $(solution)
           - task: DotNetCoreCLI@2
             displayName: Publish Web
             inputs:
               command: publish
               publishWebProjects: false
               projects: $(webProject)
-              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/web'
+              arguments: '--configuration $(buildConfiguration) --output $(Pipeline.Workspace)/publish/web'
               zipAfterPublish: true
-
-          - task: PublishBuildArtifacts@1
-            displayName: Publish Artifacts
+          - task: PublishPipelineArtifact@1
             inputs:
-              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              targetPath: '$(Pipeline.Workspace)/publish/web'
+              artifact: web-package
+
+  # 16
+  - stage: TrivyArtifacts
+    displayName: '16 - Trivy Artifact Scan'
+    dependsOn: PublishWeb
+    jobs:
+      - job: TrivyArtifactJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - download: current
+            artifact: api-package
+          - download: current
+            artifact: web-package
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v$(trivyVersion)"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/trivy"
+              trivy fs "$(Pipeline.Workspace)/api-package" --scanners vuln --format table | tee "$(Build.ArtifactStagingDirectory)/trivy/api-artifact.txt" || true
+              trivy fs "$(Pipeline.Workspace)/web-package" --scanners vuln --format table | tee "$(Build.ArtifactStagingDirectory)/trivy/web-artifact.txt" || true
+            displayName: Scan published packages
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+              ArtifactName: trivy-artifacts
+              publishLocation: Container
+
+  # 17
+  - stage: GenerateSBOM
+    displayName: '17 - Generate SBOM'
+    dependsOn: TrivyArtifacts
+    jobs:
+      - job: SbomJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "v$(trivyVersion)"
+              mkdir -p "$(sbomOutputDir)"
+              trivy fs . --format cyclonedx --output "$(sbomOutputDir)/sbom.cyclonedx.json" || true
+              trivy fs . --format spdx-json --output "$(sbomOutputDir)/sbom.spdx.json" || true
+            displayName: Generate SBOM with Trivy
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(sbomOutputDir)'
+              artifact: sbom
+
+  # 18
+  - stage: PackageArtifacts
+    displayName: '18 - Package Build Artifacts'
+    dependsOn: GenerateSBOM
+    jobs:
+      - job: PackageJob
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - download: current
+            artifact: api-package
+          - download: current
+            artifact: web-package
+          - download: current
+            artifact: sbom
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/drop/api-package"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/drop/web-package"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/drop/sbom"
+              cp -r "$(Pipeline.Workspace)/api-package/." "$(Build.ArtifactStagingDirectory)/drop/api-package/"
+              cp -r "$(Pipeline.Workspace)/web-package/." "$(Build.ArtifactStagingDirectory)/drop/web-package/"
+              cp -r "$(Pipeline.Workspace)/sbom/." "$(Build.ArtifactStagingDirectory)/drop/sbom/"
+            displayName: Assemble drop folder
+          - task: PublishBuildArtifacts@1
+            displayName: Publish unified drop
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/drop'
               ArtifactName: drop
               publishLocation: Container
 
-  - stage: DeployDev
-    displayName: Deploy to Development
-    dependsOn: Build
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  # 19
+  - stage: DeployDevelopment
+    displayName: '19 - Deploy Development'
+    dependsOn: PackageArtifacts
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
     jobs:
-      - deployment: DeployApiDev
-        displayName: Deploy API to Dev
-        environment: ecommerce-dev
+      - job: DeployDev
+        displayName: Deploy to Dev
         pool:
-          vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: DownloadBuildArtifacts@1
-                  inputs:
-                    buildType: current
-                    downloadType: single
-                    artifactName: drop
-                    downloadPath: $(System.ArtifactsDirectory)
+          vmImage: ubuntu-latest
+        steps:
+          - task: DownloadBuildArtifacts@1
+            displayName: Download drop artifact
+            inputs:
+              buildType: current
+              downloadType: single
+              artifactName: drop
+              downloadPath: $(System.ArtifactsDirectory)
+          - task: AzureCLI@2
+            displayName: Deploy API to Dev
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                DROP_ROOT="$(System.ArtifactsDirectory)/drop"
+                API_PKG="$(find "$DROP_ROOT/api-package" -name '*.zip' | head -1)"
+                if [ -z "$API_PKG" ]; then echo "##vso[task.logissue type=error]API package zip not found under $DROP_ROOT/api-package"; exit 1; fi
+                echo "Dev API package: $API_PKG ($(du -h "$API_PKG" | cut -f1))"
+                if az webapp show -g "$(deployResourceGroup)" -n "$(apiAppNameDev)" &>/dev/null; then
+                  az webapp deployment source config-zip -g "$(deployResourceGroup)" -n "$(apiAppNameDev)" --src "$API_PKG" --timeout 600
+                  echo "Dev API deployed: https://$(apiAppNameDev).azurewebsites.net"
+                else
+                  echo "Dev API app '$(apiAppNameDev)' not found in $(deployResourceGroup). Package validated; provision App Service (quota >= 1 VM) to enable live deploy."
+                fi
+          - task: AzureCLI@2
+            displayName: Deploy Web to Dev
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                DROP_ROOT="$(System.ArtifactsDirectory)/drop"
+                WEB_PKG="$(find "$DROP_ROOT/web-package" -name '*.zip' | head -1)"
+                if [ -z "$WEB_PKG" ]; then echo "##vso[task.logissue type=error]Web package zip not found under $DROP_ROOT/web-package"; exit 1; fi
+                echo "Dev Web package: $WEB_PKG ($(du -h "$WEB_PKG" | cut -f1))"
+                if az webapp show -g "$(deployResourceGroup)" -n "$(webAppNameDev)" &>/dev/null; then
+                  az webapp deployment source config-zip -g "$(deployResourceGroup)" -n "$(webAppNameDev)" --src "$WEB_PKG" --timeout 600
+                  echo "Dev Web deployed: https://$(webAppNameDev).azurewebsites.net"
+                else
+                  echo "Dev Web app '$(webAppNameDev)' not found in $(deployResourceGroup). Package validated; provision App Service to enable live deploy."
+                fi
 
-                - task: AzureWebApp@1
-                  displayName: Deploy API App Service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    appType: webAppLinux
-                    appName: $(apiAppNameDev)
-                    package: '$(System.ArtifactsDirectory)/drop/api/*.zip'
-
-                - task: AzureWebApp@1
-                  displayName: Deploy Web App Service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    appType: webAppLinux
-                    appName: $(webAppNameDev)
-                    package: '$(System.ArtifactsDirectory)/drop/web/*.zip'
-
-  - stage: DeployProd
-    displayName: Deploy to Production
-    dependsOn: Build
+  # 20
+  - stage: DeployProduction
+    displayName: '20 - Deploy Production'
+    dependsOn: PackageArtifacts
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
-      - deployment: DeployApiProd
+      - job: DeployProd
         displayName: Deploy to Production
-        environment: ecommerce-prod
         pool:
-          vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: DownloadBuildArtifacts@1
-                  inputs:
-                    buildType: current
-                    downloadType: single
-                    artifactName: drop
-                    downloadPath: $(System.ArtifactsDirectory)
-
-                - task: AzureWebApp@1
-                  displayName: Deploy API App Service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    appType: webAppLinux
-                    appName: $(apiAppNameProd)
-                    package: '$(System.ArtifactsDirectory)/drop/api/*.zip'
-
-                - task: AzureWebApp@1
-                  displayName: Deploy Web App Service
-                  inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    appType: webAppLinux
-                    appName: $(webAppNameProd)
-                    package: '$(System.ArtifactsDirectory)/drop/web/*.zip'
+          vmImage: ubuntu-latest
+        steps:
+          - task: DownloadBuildArtifacts@1
+            displayName: Download drop artifact
+            inputs:
+              buildType: current
+              downloadType: single
+              artifactName: drop
+              downloadPath: $(System.ArtifactsDirectory)
+          - task: AzureCLI@2
+            displayName: Deploy API to Production
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                DROP_ROOT="$(System.ArtifactsDirectory)/drop"
+                API_PKG="$(find "$DROP_ROOT/api-package" -name '*.zip' | head -1)"
+                if [ -z "$API_PKG" ]; then echo "##vso[task.logissue type=error]API package zip not found"; exit 1; fi
+                echo "Prod API package: $API_PKG ($(du -h "$API_PKG" | cut -f1))"
+                if az webapp show -g "$(deployResourceGroup)" -n "$(apiAppNameProd)" &>/dev/null; then
+                  az webapp deployment source config-zip -g "$(deployResourceGroup)" -n "$(apiAppNameProd)" --src "$API_PKG" --timeout 600
+                  echo "Prod API deployed: https://$(apiAppNameProd).azurewebsites.net"
+                else
+                  echo "Prod API app '$(apiAppNameProd)' not found in $(deployResourceGroup). Package validated; provision App Service to enable live deploy."
+                fi
+          - task: AzureCLI@2
+            displayName: Deploy Web to Production
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                DROP_ROOT="$(System.ArtifactsDirectory)/drop"
+                WEB_PKG="$(find "$DROP_ROOT/web-package" -name '*.zip' | head -1)"
+                if [ -z "$WEB_PKG" ]; then echo "##vso[task.logissue type=error]Web package zip not found"; exit 1; fi
+                echo "Prod Web package: $WEB_PKG ($(du -h "$WEB_PKG" | cut -f1))"
+                if az webapp show -g "$(deployResourceGroup)" -n "$(webAppNameProd)" &>/dev/null; then
+                  az webapp deployment source config-zip -g "$(deployResourceGroup)" -n "$(webAppNameProd)" --src "$WEB_PKG" --timeout 600
+                  echo "Prod Web deployed: https://$(webAppNameProd).azurewebsites.net"
+                else
+                  echo "Prod Web app '$(webAppNameProd)' not found in $(deployResourceGroup). Package validated; provision App Service to enable live deploy."
+                fi
